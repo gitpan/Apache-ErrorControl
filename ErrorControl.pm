@@ -4,7 +4,7 @@
 #
 #   author: DJ <dj@boxen.net>
 #
-# $Id: ErrorControl.pm,v 1.15 2004/05/02 10:02:24 dj Exp $
+# $Id: ErrorControl.pm,v 1.20 2004/05/03 05:06:13 dj Exp $
 
 package Apache::ErrorControl;
 
@@ -26,7 +26,7 @@ BEGIN {
   ## Variables
   use vars (qw($VERSION));
 
-  $VERSION = do {my @r=(q$Revision: 1.15 $=~/\d+/g); sprintf "%d."."%03d"x$#r,@r};
+  $VERSION = do {my @r=(q$Revision: 1.20 $=~/\d+/g); sprintf "%d."."%03d"x$#r,@r};
 }
 # }}}
 
@@ -42,7 +42,7 @@ sub handler {
   my $s             = $r->server;
 
   # check for test mode/hardcoded mode
-  if ($r->uri() =~ /(\d{2,3})[\/]*$/) {
+  if ($r->uri() =~ /\/(\d+)[\/]?$/) {
     $self->{error_code} = $1;
   } else {
     $self->{error_code} = ($r->prev()) ?
@@ -427,9 +427,7 @@ of course you run into problems for some reason and are forced to.
 
 =head1 OPTIONS
 
-=over 4
-
-=item HTTPD CONFIG PerlSetVar's
+=head2 HTTPD CONFIG
 
 =over 4
 
@@ -486,11 +484,9 @@ instead of a PerlSetVar.
 
 =back
 
-=item Template Options
+=head2 TEMPLATE
 
-=over 4
-
-=item TMPL_SET
+=head3 TMPL_SET
 
 =over 4
 
@@ -511,7 +507,7 @@ on a per-template basis.
 
 =back
 
-=item TMPL_VAR/TMPL_IF
+=head3 TMPL_VAR / TMPL_IF
 
 =over 4
 
@@ -539,7 +535,7 @@ http://www.abc.com/stuff/stuffed.cgi?abc=yes&no=yes
 
 =item *
 
-B<date> - the date/time of the error (format depending on the 
+B<date> - the date/time of the error (format depending on the
 B<DateFormat>/B<date_format>.
 
   <TMPL_VAR NAME="date">
@@ -566,7 +562,7 @@ added it here anyways.
 =item *
 
 B<unknown_error> - if the B<*error_code*> is not defined as a TMPL_VAR or
-TMPL_IF and there is a TMPL_IF/TMPL_VAR by the name of B<unknown_error> it is
+TMPL_IF and there is a TMPL_IF / TMPL_VAR by the name of B<unknown_error> it is
 set to TRUE (1). as mentioned above I cannot see why anyone would want this.
 
   <TMPL_IF NAME="unknown_error">
@@ -582,15 +578,17 @@ for details.
 
 =back
 
-=back
-
-=back
-
 =head1 CAVEATS
 
 This module may be missing something that you feel it needs, it has
 everything I have wanted thou. If you want a feature added please email me
 or send me a patch.
+
+One thing to note is that if you go to your handler directly
+(i.e. http://www.abc.com/error) the system will assume the I<error_code> is
+200 (which of course is 'OK'). I couldnt think of a better way of handling this
+aside from B<die>ing. If you are interested in testing your templates see the
+B<TESTING> section.
 
 =head1 BUGS
 
@@ -607,7 +605,7 @@ David J Radunz <dj@boxen.net>
 
 =head1 LICENSE
 
-HTML::Template::Set : HTML::Template extension adding set support
+Apache::ErrorControl : Apache Handler for Templating Apache Error Documents
 
 Copyright (C) 2004 David J Radunz (dj@boxen.net)
 
