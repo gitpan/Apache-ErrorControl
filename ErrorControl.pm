@@ -4,7 +4,7 @@
 #
 #   author: DJ <dj@boxen.net>
 #
-# $Id: ErrorControl.pm,v 1.22 2004/05/04 08:18:18 dj Exp $
+# $Id: ErrorControl.pm,v 1.26 2004/09/09 04:02:26 dj Exp $
 
 package Apache::ErrorControl;
 
@@ -28,7 +28,7 @@ BEGIN {
   ## Variables
   use vars (qw($VERSION));
 
-  $VERSION = do {my @r=(q$Revision: 1.22 $=~/\d+/g); sprintf "%d."."%03d"x$#r,@r};
+  $VERSION = do {my @r=(q$Revision: 1.26 $=~/\d+/g); sprintf "%d."."%03d"x$#r,@r};
 }
 # }}}
 
@@ -37,6 +37,14 @@ BEGIN {
 sub handler {
   my $r = shift;
   my $self = bless({}, __PACKAGE__);
+
+  # Set Apache::ErrorControl as a subprocess_env/prev->subprocess_env/%ENV
+  $r->subprocess_env('APACHE_ERROR_CONTROL', $VERSION);
+  if ($r->prev()) {
+    $r->prev()->subprocess_env('APACHE_ERROR_CONTROL', $VERSION);
+  }
+  $ENV{'APACHE_ERROR_CONTROL'} = $VERSION;
+
 
   # Define Variables {{{
   my $file          = $r->filename;
@@ -290,17 +298,17 @@ sub handler {
     );
 
     # Construct Included Debug
+    my %content;
     my ($headers_in, $headers_out, $err_headers_out, $subprocess_env);
     if ($r->prev()) {
+      %content         =  $r->prev()->content();
       $headers_in      =  $r->prev()->headers_in();
       $headers_out     =  $r->prev()->headers_out();
       $err_headers_out =  $r->prev()->err_headers_out();
       $subprocess_env  =  $r->prev()->subprocess_env();
     }
-    # this is my 'ninja' code to getting the POST arguments, it will only
-    # work on status 204, 304, 400, 408, 411, 413, 414, 500, 501, 503 -
-    # hey one of them is 500 so im happy :D :D :D
-    my %content         = $r->content();
+    # NB: retrieval of POST data will only work on status 204, 304, 400, 408,
+    # 411, 413, 414, 500, 501, 503 - hey one of them is 500 so im happy :D :D
 
     my %files = (
       headers_in      =>  $headers_in,
@@ -308,7 +316,8 @@ sub handler {
       err_headers_out =>  $err_headers_out,
       notes           =>  $notes,
       subprocess_env  =>  $subprocess_env,
-      post_data       =>  \%content
+      post_data       =>  \%content,
+      env             =>  \%ENV
     );
 
     foreach my $file (keys %files) {
@@ -342,7 +351,7 @@ sub handler {
 
 
   # Send Template {{{
-  print $tmpl->output();
+  $r->print($tmpl->output());
   # }}}
 
   return;
@@ -359,7 +368,10 @@ sub apache_table_to_string {
   my @string = ();
 
   while(my($key,$val) = each %$table) {
-    push(@string, sprintf("%-15s %-100s", $key, $val));
+    next unless ($key);
+    my $string = sprintf("%-15s", $key);
+    $string .= $val if ($val);
+    push(@string, $string);
   }
 
   return join("\n", @string);
@@ -569,14 +581,33 @@ L<Apache::Table> retrieved from C<$r-E<gt>prev()-E<gt>subprocess_env()>.
 
 =item *
 
+B<env.txt> - a snapshot of the ENV (global environment variables) hash.
+
+=item *
+
 B<post_data.txt> - the I<POST> data, a snapshot of the
-hash from C<$r-E<gt>content()>. this is the only way I know of retrieving
-the I<POST> data and it will B<*ONLY*> be present during I<error codes>: 204,
-304, 400, 408, 411, 413, 414, 500, 501, 503 which doesnt worry me since 500 is
-one of the mentioned codes - but you may need the I<POST> data for a different
-I<error code>. I<GET> data of course is tacked onto the end of the request_uri.
+hash from C<$r-E<gt>prev()-E<gt>content()>. this is the only way I know of
+retrieving the I<POST> data and it will B<*ONLY*> be present during
+I<error codes>: 204, 304, 400, 408, 411, 413, 414, 500, 501, 503 which doesnt
+worry me since 500 is one of the mentioned codes - but you may need the
+I<POST> data for a different I<error code>. I<GET> data of course is tacked
+onto the end of the request_uri.  the I<POST> data will also not appear
+unless the I<Content-Type> is C<application/x-www-form-urlencoded>.
 
 =back
+
+=head2 EXAMPLE EMAIL
+
+Below is an example email (obviously missing the file attachments).
+
+  Subject: Error 500 on www.abc.com
+
+  Time: 2004-05-05 14:27:22
+  Requested URL: http://www.abc.com/testing/testing123.cgi
+  Requested By: dj (dj.abc.com (10.0.0.10))
+
+  --------------------
+  Apache::ErrorControl
 
 =head1 OPTIONS
 
