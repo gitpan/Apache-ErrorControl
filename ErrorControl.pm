@@ -1,10 +1,10 @@
-
+# Apache::ErrorControl
 #
 #   description: Apache Error Templating Engine
 #
 #   author: DJ <dj@boxen.net>
 #
-# $Id: ErrorControl.pm,v 1.20 2004/05/03 05:06:13 dj Exp $
+# $Id: ErrorControl.pm,v 1.22 2004/05/04 08:18:18 dj Exp $
 
 package Apache::ErrorControl;
 
@@ -17,7 +17,9 @@ BEGIN {
   use HTML::Template::Set;
   use Apache::Constants qw(:common);
   use Apache::File ();
+  use Apache::Request;
   use Class::Date;
+  use MIME::Entity;
 
   ## Constants
   use constant TRUE  => 1;
@@ -26,7 +28,7 @@ BEGIN {
   ## Variables
   use vars (qw($VERSION));
 
-  $VERSION = do {my @r=(q$Revision: 1.20 $=~/\d+/g); sprintf "%d."."%03d"x$#r,@r};
+  $VERSION = do {my @r=(q$Revision: 1.22 $=~/\d+/g); sprintf "%d."."%03d"x$#r,@r};
 }
 # }}}
 
@@ -45,8 +47,16 @@ sub handler {
   if ($r->uri() =~ /\/(\d+)[\/]?$/) {
     $self->{error_code} = $1;
   } else {
-    $self->{error_code} = ($r->prev()) ?
-      $r->prev()->status() : $r->status();
+    unless ($r->prev()) {
+      # return FORBIDDEN if the handler is being accessed directly
+      return FORBIDDEN;
+    } else {
+      # return FORBIDDEN if the handler for some reason has OK for the
+      # prev->status
+      $self->{error_code} = $r->prev()->status();
+
+      return FORBIDDEN if ($self->{error_code} == OK);
+    }
   }
 
   $self->{document_root} = $r->document_root();
@@ -70,23 +80,34 @@ sub handler {
   my $disable_email = $r->dir_config("DisableEmail");
   unless ($disable_email) {
     $MTA_Prog = $r->dir_config("MTA");
-    unless (defined $MTA_Prog and -f $MTA_Prog) {
+    if ($MTA_Prog) {
+      # bah, how else do i check -f when its got a -t or something?
+      my ($path) = split(/\s+/, $MTA_Prog);
+      unless (defined $path and -f $path) {
+        undef($MTA_Prog);
+      }
+    }
+    unless ($MTA_Prog) {
       if (-f "/var/qmail/bin/qmail-inject") {
         $MTA_Prog = "/var/qmail/bin/qmail-inject";
       } elsif (-f "/usr/sbin/sendmail") {
-        $MTA_Prog = "/usr/sbin/sendmail";
+        $MTA_Prog = "/usr/sbin/sendmail -t";
       } elsif (-f "/usr/lib/sendmail") {
-        $MTA_Prog = "/usr/lib/sendmail";
+        $MTA_Prog = "/usr/lib/sendmail -t";
       }
     }
     # build the email_on hash, defaulting to 500
-    my @email_on = $r->dir_config("EmailOn");
+    my $have_email_on = FALSE;
+    my @email_on = $r->dir_config()->get("EmailOn");
     if (@email_on) {
       foreach my $ec (@email_on) {
         next unless (defined $ec and $ec);
         $email_on{$ec} = TRUE;
+        $have_email_on = TRUE;
       }
-    } else {
+    }
+    unless ($have_email_on) {
+      # default to email_on Internal Server Error's
       $email_on{'500'} = TRUE;
     }
   }
@@ -105,6 +126,7 @@ sub handler {
     %tmpl_args,
     filename      => $template,
     cache         => TRUE,
+#    debug         => TRUE,
     associate_env => TRUE
   );
   # }}}
@@ -117,21 +139,42 @@ sub handler {
   my %params;
   map { $params{$_} = TRUE } $tmpl->param();
 
-  # build a list of 'emails' to send messages to if a error 500 is encountered
-  # (internal server error). also if the 'webmaster_email' TMPL_VAR is the
-  # same as the server_admin only send the email once.
+  # build a list of emails to send emails to, unless DisableEmail is turned on,
+  # there isnt an EmailOn for this error code or the MTA_Prog is not defined.
   my (@email) = ();
   unless ($disable_email) {
-    if (exists $params{'webmaster_email'}) {
-      my $webmaster_email = $tmpl->param('webmaster_email');
-      unless ($webmaster_email eq $s->server_admin()) {
-        push(@email, $s->server_admin());
+    if (exists $email_on{$self->{error_code}} and $MTA_Prog) {
+      my @email_to = $r->dir_config()->get('EmailTo');
+      if (@email_to) {
+        # push the emails specified in EmailTo
+        foreach my $email (@email_to) {
+          next unless ($email);
+          push(@email, $email);
+        }
       }
-      push(@email, $webmaster_email);
-    } elsif ($s->server_admin()) {
-      push(@email, $s->server_admin());
+      my $email_server_admin = $r->dir_config('EmailServerAdmin');
+      if ($email_server_admin) {
+        # default to adding the server_admin to the @email if there are no
+        # EmailOn's or EmailServerAdmin is on
+        my $server_admin = $s->server_admin();
+        unless (grep(/^\Q$server_admin\E$/, @email)) {
+          push(@email, $server_admin);
+        }
+      }
+      if (exists $params{'webmaster_email'}) {
+        # if a webmaster_email is specified add it to the @email, unless it
+        # already exists in the array
+        my $webmaster_email = $tmpl->param('webmaster_email');
+
+        # lets not add the webmaster_email if its in EmailTo
+        unless (grep(/^\Q$webmaster_email\E$/, @email)) {
+          push(@email, $webmaster_email);
+        }
+      }
     }
   }
+
+  my $notes = ($r->prev()) ? $r->prev()->notes() : undef;
 
   # set the current error_code's TMPL_IF on (if the TMPL_IF exists)
   #  i.e. <TMPL_IF NAME="404">
@@ -144,6 +187,11 @@ sub handler {
   #   i.e. <TMPL_VAR NAME="error_code"> (which is substituted with 404)
   if (exists $params{error_code}) {
     $tmpl->param( error_code => $self->{error_code} );
+  }
+  # set the error_note if its defined
+  if (exists $params{'error_notes'} 
+  and $notes and exists $notes->{'error-notes'}) {
+    $tmpl->param( error_notes => $notes->{'error-notes'} );
   }
 
   # load the 'date_format' from the template if its set
@@ -219,23 +267,69 @@ sub handler {
 
 
   # Send Email For Internal Server Error {{{
-  unless ($disable_email) {
-    if (exists $email_on{$self->{error_code}} and defined $MTA_Prog 
-    and -f $MTA_Prog) {
-      foreach my $email_address (@email) {
-        open(MTA,"|$MTA_Prog");
-        print MTA "To: $email_address\n";
-        print MTA "From: Apache::ErrorControl <errorcontrol\@".
-          $s->server_hostname.">\n";
-        print MTA "Subject: Error ". $self->{error_code}. " on ".
-          $s->server_hostname."\n\n";
-        print MTA "Time: ". $formatted_date. "\n";
-        print MTA "Requested URL: ". $request_url. "\n";
-        print MTA "Requested By: ". $requestor. "\n\n";
-        print MTA "--------------------\n";
-        print MTA "Apache::ErrorControl\n\n";
-        close(MTA);
+  if (@email > 0) {
+    # build our email
+    my $mobj = MIME::Entity->build(
+      'From'        => 'Apache::ErrorControl <apache-errorcontrol@'.
+        $s->server_hostname(). '>',
+      'Subject'     => 'Error '. $self->{error_code}. ' on '.
+        $s->server_hostname(),
+      'Type'        => 'multipart/mixed',
+      'X-Mailer'    => 'Apache::ErrorControl'
+    );
+
+    my $body = 'Time: '. $formatted_date. "\n".
+                'Requested URL: '. $request_url. "\n".
+                'Requested By: '. $requestor. "\n\n".
+                "--------------------\n".
+                "Apache::ErrorControl\n\n";
+
+    $mobj->attach(
+      Data     => $body,
+      Type     => 'text/plain'
+    );
+
+    # Construct Included Debug
+    my ($headers_in, $headers_out, $err_headers_out, $subprocess_env);
+    if ($r->prev()) {
+      $headers_in      =  $r->prev()->headers_in();
+      $headers_out     =  $r->prev()->headers_out();
+      $err_headers_out =  $r->prev()->err_headers_out();
+      $subprocess_env  =  $r->prev()->subprocess_env();
+    }
+    # this is my 'ninja' code to getting the POST arguments, it will only
+    # work on status 204, 304, 400, 408, 411, 413, 414, 500, 501, 503 -
+    # hey one of them is 500 so im happy :D :D :D
+    my %content         = $r->content();
+
+    my %files = (
+      headers_in      =>  $headers_in,
+      headers_out     =>  $headers_out,
+      err_headers_out =>  $err_headers_out,
+      notes           =>  $notes,
+      subprocess_env  =>  $subprocess_env,
+      post_data       =>  \%content
+    );
+
+    foreach my $file (keys %files) {
+      my $string = $self->apache_table_to_string($files{$file});
+      if ($string) {
+        $mobj->attach(
+          Data     =>  $string,
+          Filename =>  $file. '.txt',
+          Type     =>  'text/plain',
+          Encoding =>  'base64'
+        );
       }
+    }
+
+    foreach my $email_address (@email) {
+      $mobj->head()->replace('To', $email_address);
+
+      open(MTAHANDLE,"|$MTA_Prog")
+        or die "Failed to open MTA: ". $MTA_Prog. ": $!\n";
+      $mobj->print(\*MTAHANDLE);
+      close(MTAHANDLE);
     }
   }
   # }}}
@@ -252,6 +346,23 @@ sub handler {
   # }}}
 
   return;
+}
+# }}}
+
+
+# Apache Table To String Function {{{
+sub apache_table_to_string {
+  my ($self, $table) = @_;
+
+  return unless ($table);
+
+  my @string = ();
+
+  while(my($key,$val) = each %$table) {
+    push(@string, sprintf("%-15s %-100s", $key, $val));
+  }
+
+  return join("\n", @string);
 }
 # }}}
 
@@ -380,13 +491,14 @@ pages please see: L<HTML::Template::Set> and L<HTML::Template>. Also check
 the B<OPTIONS> section of this documentation for available TMPL_SET/TMPL_IF
 and TMPL_VAR params.
 
-By default when an error 500 (internal server error) is encountered the
-I<server admin> is emailed (along with the B<webmaster_email> if its defined,
-see: B<OPTIONS>). This functionality can be disabled all together with the
-B<DisableEmail> option or enhanced with the B<EmailOn> option.
+By default when an error 500 (internal server error) is encountered an error
+email is sent about it. the addresses emailed depend on the options specified.
+please see the B<OPTIONS> section for help configuring this. you can also
+extend the system to send error emails on more than just internal server
+errors, please see the B<EmailOn> option for how to do this.
 
-Templates are looked up in the following order: the document_root is scanned
-for 'allerrors', 'allerrors.tmpl', I<error_code> or I<error_code>.tmpl. if
+Templates are looked up in the following order: the I<document root> is scanned
+for 'allerrors', 'allerrors.tmpl', I<error code> or I<error code>.tmpl. if
 no templates are found the B<TemplateDir> is scanned for the same files. if
 no templates are found the B<DefaultTemplate> is used and if its not set
 the system 'B<die>s'.
@@ -403,27 +515,68 @@ per error message, but you can set it up any way you want.
 I wanted to write a mod_perl handler so I could template error messages.
 I also wanted to make it extensible enough that I could have a global error
 handler and it would cover all the virtual webservers and have different
-templates for each of them - ala - the birth of Apache::ErrorControl.
+templates for each of them - ergo - the birth of Apache::ErrorControl.
 
 =head1 TESTING
 
 Obviously you will need the ability to test your templates, and trying to
-generate each error code would be a pain in the ass. So to counter this I have
-implemented a B<testing>/B<static> mode. Basically you call the handler with
-"/I<error_code>" tacked on the end. You can also use this to define static
+generate each I<error code> would be a pain in the ass. So to counter this
+I have implemented a B<testing>/B<static> mode. Basically you call the handler
+with "/I<error code>" tacked on the end. You can also use this to define static
 error pages if you dont want the system to "automagically" determine the
-I<error_code>.
+I<error code>.
 
 to test error 401:
 
-  http:/www.abc.com/error/401
+  http://www.abc.com/error/401
 
 to statically configure error 401:
 
   ErrorDocument 401 /error/401
 
-I dont see why you would want to statically configure an error code, unless
+I dont see why you would want to statically configure an I<error code>, unless
 of course you run into problems for some reason and are forced to.
+
+=head1 ERROR EMAILS
+
+This module has the ability to send an email on an error. you can define
+what error code to email on and what email addresses to send emails to, please
+see the B<OPTIONS> section on how to do this. the error email contains various
+attached files and these are present in the email depending on weather or not
+their data could be retrieved. the attached files are detailed below.
+
+=over 4
+
+=item *
+
+B<headers_in.txt> - the inwards headers, a snapshot of the L<Apache::Table>
+retrieved from C<$r-E<gt>prev()-E<gt>headers_in()>.
+
+=item *
+
+B<headers_out.txt> - the outwards headers, a snapshot of the L<Apache::Table>
+retrieved from C<$r-E<gt>prev()-E<gt>headers_out()>.
+
+=item *
+
+B<err_headers_out.txt> - the outwards error headers, a snapshot of the
+L<Apache::Table> retrieved from C<$r-E<gt>prev()-E<gt>err_headers_out()>.
+
+=item *
+
+B<subprocess_env.txt> - the sub process environment, a snapshot of the
+L<Apache::Table> retrieved from C<$r-E<gt>prev()-E<gt>subprocess_env()>.
+
+=item *
+
+B<post_data.txt> - the I<POST> data, a snapshot of the
+hash from C<$r-E<gt>content()>. this is the only way I know of retrieving
+the I<POST> data and it will B<*ONLY*> be present during I<error codes>: 204,
+304, 400, 408, 411, 413, 414, 500, 501, 503 which doesnt worry me since 500 is
+one of the mentioned codes - but you may need the I<POST> data for a different
+I<error code>. I<GET> data of course is tacked onto the end of the request_uri.
+
+=back
 
 =head1 OPTIONS
 
@@ -435,10 +588,11 @@ of course you run into problems for some reason and are forced to.
 
 B<TemplateDir> - the directory of your templates, this path will be used
 when looking up the template for the error message (looking in it for either
-I<error_code>, I<error_code>.tmpl, allerrors, allerrors.tmpl - then falling back
-to looking for the files mentioned before under the document_root - then
+I<error code>, I<error code>.tmpl, allerrors, allerrors.tmpl - then falling back
+to looking for the files mentioned before under the I<document root> - then
 falling back to using the B<DefaultTemplate> - then 'B<die>ing').
-the B<TemplateDir> is also passed to L<HTML::Template::Set> as the B<path>.
+the B<TemplateDir> is also passed to L<HTML::Template::Set> as the B<path>
+option.
 
   PerlSetVar TemplateDir "/usr/local/apache/templates"
 
@@ -451,7 +605,7 @@ B<DefaultTemplate> - the default template file to use, can be just a filename
 
 =item *
 
-B<MTA> - (mail transit authority), basically the path to the program to send
+B<MTA> - (Mail Transport Agent), basically the path to the program to send
 email with (i.e. sendmail, qmail-send etc). dont forget to provide any options
 needed for your MTA to function correctly (i.e. B<-t> for sendmail).
 
@@ -460,7 +614,7 @@ needed for your MTA to function correctly (i.e. B<-t> for sendmail).
 =item *
 
 B<DateFormat> - you can specify the date format to use in emails and in the
-templates here. just provide a strftime format. this can be overrided on a
+templates here. just provide a B<strftime> format. this can be overrided on a
 per template basis with the B<date_format> TMPL_SET param. if this isnt
 specified a default date format is used.
 
@@ -468,8 +622,25 @@ specified a default date format is used.
 
 =item *
 
+B<EmailTo> - to specify globally email addresses to send messages to please
+use this option. use a PerlAddVar for each email you wish to send to.
+
+  PerlAddVar EmailTo "dj@abc.com.au"
+  PerlAddVar EmailTo "dj@xyz.com.au"
+
+=item *
+
+B<EmailServerAdmin> - if you want the I<server admin> to receive a copy of the
+email please turn this option on (set it to 1). this is more useful in a
+virtual hosting environment where the I<server admin> is different for
+each virtual host.
+
+  PerlSetVar EmailServerAdmin 1
+
 B<DisableEmail> - if you want to disable error emails all together then
-set this to true.
+set this to true. this is a good way of disabling emails during fixing a
+problem (rather than removing all the email settings, directive by directive,
+template by template).
 
   PerlSetVar DisableEmail 1
 
@@ -492,9 +663,8 @@ instead of a PerlSetVar.
 
 =item *
 
-B<webmaster_email> - setting this param enables the error email to be sent
-to some place other than just the server_admin, however unless this address
-is the same as the server admin's email an email is sent to both places.
+B<webmaster_email> - this paramater allows you to set add an email address
+to send error messages to on a per-template basis.
 
   <TMPL_SET NAME="webmaster_email">dj@abc.com</TMPL_SET>
 
@@ -536,22 +706,22 @@ http://www.abc.com/stuff/stuffed.cgi?abc=yes&no=yes
 =item *
 
 B<date> - the date/time of the error (format depending on the
-B<DateFormat>/B<date_format>.
+B<DateFormat> / B<date_format>.
 
   <TMPL_VAR NAME="date">
 
 =item *
 
-B<error_code> - the error code, i.e. 404, 403, 500 etc
+B<error_code> - the I<error code>, i.e. 404, 403, 500 etc
 
   <TMPL_VAR NAME="error_code">
 
 =item *
 
-B<*error_code*> - the actual error code itself is set as a param (if the
+B<*error_code*> - the actual I<error code> itself is set as a param (if the
 param exists). if there is no TMPL_IF or TMPL_VAR
-defined for the error code encountered the param B<unknown_error> is turned on
-(obviously only if it too is defined).
+defined for the I<error code> encountered the param B<unknown_error> is
+turned on (obviously only if it too is defined).
 personally I cant see why anyone would ever need B<unknown_error> but ive
 added it here anyways.
 
@@ -571,6 +741,21 @@ set to TRUE (1). as mentioned above I cannot see why anyone would want this.
 
 =item *
 
+B<error_notes> - the error-notes (C<$r-E<gt>prev()-E<gt>notes('error-notes')>,
+see L<Apache>). this is more useful in say a staging environment that has
+mod_perl applications. it is the error message, for mod_perl applications
+it includes the complete error message but for normal cgi applications
+it just includes 'premature end of script headers'.
+
+  <TMPL_IF NAME="error_notes">
+    <h2>Error Notes</h2>
+    <pre>
+    <TMPL_VAR NAME="error_notes">
+    </pre>
+  </TMPL_IF>
+
+=item *
+
 B<env_*> - all env_* params are available, see L<HTML::Template::Set>
 for details.
 
@@ -578,17 +763,27 @@ for details.
 
 =back
 
+=head1 OPTIMISATION
+
+As the module loads L<HTML::Template::Set> with the B<cache> option all
+templates are automatically cached. To further increase the performance you
+should look at the documentation of L<HTML::Template> for instructions on how
+to pre-load your templates under mod_perl. If you do not use this methodology
+L<HTML::Template> will only cache your templates per apache child process and
+upon using them (i.e. before you will notice the benefits of using cache each
+apache child process needs to load each template).
+
 =head1 CAVEATS
 
 This module may be missing something that you feel it needs, it has
-everything I have wanted thou. If you want a feature added please email me
+everything I have wanted though. If you want a feature added please email me
 or send me a patch.
 
 One thing to note is that if you go to your handler directly
-(i.e. http://www.abc.com/error) the system will assume the I<error_code> is
-200 (which of course is 'OK'). I couldnt think of a better way of handling this
-aside from B<die>ing. If you are interested in testing your templates see the
-B<TESTING> section.
+(i.e. http://www.abc.com/error) the system will return I<FORBIDDEN>. this will
+also happen if your I<error code> is ever 200 (I<OK>) (which it should never be
+unless you are accessing the handler directly). If you are interested in
+testing your templates see the B<TESTING> section.
 
 =head1 BUGS
 
