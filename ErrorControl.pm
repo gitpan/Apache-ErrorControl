@@ -4,7 +4,7 @@
 #
 #   author: DJ <dj@boxen.net>
 #
-# $Id: ErrorControl.pm,v 1.12 2004/05/02 05:33:55 dj Exp $
+# $Id: ErrorControl.pm,v 1.15 2004/05/02 10:02:24 dj Exp $
 
 package Apache::ErrorControl;
 
@@ -26,7 +26,7 @@ BEGIN {
   ## Variables
   use vars (qw($VERSION));
 
-  $VERSION = do {my @r=(q$Revision: 1.12 $=~/\d+/g); sprintf "%d."."%03d"x$#r,@r};
+  $VERSION = do {my @r=(q$Revision: 1.15 $=~/\d+/g); sprintf "%d."."%03d"x$#r,@r};
 }
 # }}}
 
@@ -442,10 +442,14 @@ to looking for the files mentioned before under the document_root - then
 falling back to using the B<DefaultTemplate> - then 'B<die>ing').
 the B<TemplateDir> is also passed to L<HTML::Template::Set> as the B<path>.
 
+  PerlSetVar TemplateDir "/usr/local/apache/templates"
+
 =item *
 
 B<DefaultTemplate> - the default template file to use, can be just a filename
 (to be looked up under B<TemplateDir>) or the full path to the file.
+
+  PerlSetVar DefaultTemplate "myerrors.tmpl"
 
 =item *
 
@@ -496,10 +500,14 @@ B<webmaster_email> - setting this param enables the error email to be sent
 to some place other than just the server_admin, however unless this address
 is the same as the server admin's email an email is sent to both places.
 
+  <TMPL_SET NAME="webmaster_email">dj@abc.com</TMPL_SET>
+
 =item *
 
 B<date_format> - this option overrides the B<DateFormat> HTTPD CONF entry
 on a per-template basis.
+
+  <TMPL_SET NAME="date_format">%d-%m-%Y %H:%M:S</TMPL_SET>
 
 =back
 
@@ -511,33 +519,49 @@ on a per-template basis.
 
 B<requestor> - the requestor of the page either "user (hostname (ip))",
 "user (ip)", "hostname (ip)" or "ip", depending if their ip resolves or not.
+NB: unless you have "HostnameLookups On" in you httpd.conf you will never
+see the users hostname.
+
+  <TMPL_VAR NAME="requestor">
 
 =item *
 
 B<base_url> - the base url of the website, i.e. http://www.abc.com
+
+  <TMPL_VAR NAME="base_url">
 
 =item *
 
 B<request_url> - the full request url including arguments, i.e.
 http://www.abc.com/stuff/stuffed.cgi?abc=yes&no=yes
 
-=item *
-
-B<error_code> - the error code, i.e. 404, 403, 500 etc
+  <TMPL_VAR NAME="request_url">
 
 =item *
 
 B<date> - the date/time of the error (format depending on the 
 B<DateFormat>/B<date_format>.
 
+  <TMPL_VAR NAME="date">
+
+=item *
+
+B<error_code> - the error code, i.e. 404, 403, 500 etc
+
+  <TMPL_VAR NAME="error_code">
+
 =item *
 
 B<*error_code*> - the actual error code itself is set as a param (if the
-param exists), i.e. <TMPL_IF NAME="404">. if there is no TMPL_IF or TMPL_VAR
+param exists). if there is no TMPL_IF or TMPL_VAR
 defined for the error code encountered the param B<unknown_error> is turned on
-(obviously only if it too is defined) i.e. <TMPL_IF NAME="unknown_error">.
+(obviously only if it too is defined).
 personally I cant see why anyone would ever need B<unknown_error> but ive
 added it here anyways.
+
+  <TMPL_IF NAME="404">
+    Error 404 - File Not Found
+  </TMPL_IF>
 
 =item *
 
@@ -545,11 +569,16 @@ B<unknown_error> - if the B<*error_code*> is not defined as a TMPL_VAR or
 TMPL_IF and there is a TMPL_IF/TMPL_VAR by the name of B<unknown_error> it is
 set to TRUE (1). as mentioned above I cannot see why anyone would want this.
 
+  <TMPL_IF NAME="unknown_error">
+    Error <TMPL_VAR NAME="error_code"> - Unknown
+  </TMPL_IF>
+
 =item *
 
-B<env_*> - all env_* params are available (i.e.
-<TMPL_VAR NAME="env_server_name">),
-see L<HTML::Template::Set> for details.
+B<env_*> - all env_* params are available, see L<HTML::Template::Set>
+for details.
+
+  <TMPL_VAR NAME="env_server_name">
 
 =back
 
